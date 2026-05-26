@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: owa_calendar
+            asset_name: owa_calendar-linux-x86_64
+          - os: macos-latest
+            artifact_name: owa_calendar
+            asset_name: owa_calendar-macos-x86_64
+          - os: windows-latest
+            artifact_name: owa_calendar.exe
+            asset_name: owa_calendar-windows-x86_64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --locked
+
+      - name: Build
+        run: dx build --release --platform desktop
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.artifact_name }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename artifacts
+        run: |
+          mv artifacts/owa_calendar-linux-x86_64/owa_calendar   artifacts/owa_calendar-linux-x86_64
+          mv artifacts/owa_calendar-macos-x86_64/owa_calendar   artifacts/owa_calendar-macos-x86_64
+          mv artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe artifacts/owa_calendar-windows-x86_64.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/owa_calendar-linux-x86_64
+            artifacts/owa_calendar-macos-x86_64
+            artifacts/owa_calendar-windows-x86_64.exe
+          generate_release_notes: true

@@ -1,0 +1,11 @@
+/* App-wide styling */
+body {
+    background-color: #f8f3ef;
+    color: #333;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin-top: 0;
+}
+
+a {
+    color: #2459bb;
+}

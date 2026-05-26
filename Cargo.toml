@@ -10,7 +10,7 @@ edition = "2021"
 dioxus = { version = "0.6.0", features = ["desktop"] }
 manganis = "0.2"
 image = { version = "0.24", features = ["ico"] }
-notify-rust = "4.11.7"
+notify-rust = { version = "4.11.7", features = ["async"] }
 reqwest = { version = "0.12", features = ["cookies", "json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

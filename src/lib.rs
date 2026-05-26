@@ -420,7 +420,7 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
         .unwrap_or("");
     let location_url = extract_url(location_link);
 
-    let (summary, body, urgency) = match notification_type {
+    let (summary, body) = match notification_type {
         NotificationType::FifteenMinutes => {
             let summary = format!("⏰ Через 15 минут: {}", event.subject);
             let body = format!(
@@ -429,8 +429,7 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
                 location_url,
                 location_url
             );
-            let urgency = notify_rust::Urgency::Normal;
-            (summary, body, urgency)
+            (summary, body)
         }
         NotificationType::EventStart => {
             let summary = format!("🔔 Началось: {}", event.subject);
@@ -440,20 +439,25 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
                 location_url,
                 location_url
             );
-            let urgency = notify_rust::Urgency::Critical;
-            (summary, body, urgency)
+            (summary, body)
         }
     };
 
-    let _ = Notification::new()
-        .appname("OWA Calendar")
+    #[cfg(target_os = "linux")]
+    let urgency = match notification_type {
+        NotificationType::FifteenMinutes => notify_rust::Urgency::Normal,
+        NotificationType::EventStart => notify_rust::Urgency::Critical,
+    };
+
+    let mut n = Notification::new();
+    n.appname("OWA Calendar")
         .summary(&summary)
         .body(&body)
         .auto_icon()
-        .urgency(urgency)
-        .timeout(0)
-        .show_async()
-        .await;
+        .timeout(0);
+    #[cfg(target_os = "linux")]
+    n.urgency(urgency);
+    let _ = n.show_async().await;
 }
 
 pub fn extract_url(s: &str) -> &str {

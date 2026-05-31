@@ -1,6 +1,6 @@
 [package]
 name = "owa_calendar"
-version = "1.0.3"
+version = "1.0.4"
 authors = ["Michael Yurin"]
 edition = "2021"
 

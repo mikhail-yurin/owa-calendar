@@ -4,15 +4,16 @@ use notify_rust::Notification;
 async fn msg() {
     let body = format!("<b>Start:</b> 10:00\n<a href='https://google.com'>Open</a>");
 
-    let _ = Notification::new()
-        .appname("OWA Calendar")
+    let mut n = Notification::new();
+    n.appname("OWA Calendar")
         .summary("🔔 Some event")
         .body(&body)
         .auto_icon()
-        .timeout(0)
-        // .urgency(notify_rust::Urgency::Critical) // Low, Normal, Critical
-        .show_async()
-        .await;
+        .timeout(0);
+    #[cfg(target_os = "linux")]
+    let _ = n.show_async().await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = n.show();
 }
 
 #[component]

@@ -457,7 +457,10 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
         .timeout(0);
     #[cfg(target_os = "linux")]
     n.urgency(urgency);
+    #[cfg(target_os = "linux")]
     let _ = n.show_async().await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = n.show();
 }
 
 pub fn extract_url(s: &str) -> &str {

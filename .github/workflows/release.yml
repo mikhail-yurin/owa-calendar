@@ -8,6 +8,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: true
     strategy:
       matrix:
         include:
@@ -64,6 +65,7 @@ jobs:
   release:
     name: Publish Release
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -76,9 +78,9 @@ jobs:
 
       - name: Rename artifacts
         run: |
-          mv artifacts/owa_calendar-linux-x86_64/owa_calendar   artifacts/owa_calendar-linux-x86_64
-          mv artifacts/owa_calendar-macos-x86_64/owa_calendar   artifacts/owa_calendar-macos-x86_64
-          mv artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe artifacts/owa_calendar-windows-x86_64.exe
+          [ -f artifacts/owa_calendar-linux-x86_64/owa_calendar ] && mv artifacts/owa_calendar-linux-x86_64/owa_calendar artifacts/owa_calendar-linux-x86_64 || true
+          [ -f artifacts/owa_calendar-macos-x86_64/owa_calendar ] && mv artifacts/owa_calendar-macos-x86_64/owa_calendar artifacts/owa_calendar-macos-x86_64 || true
+          [ -f "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" ] && mv "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" artifacts/owa_calendar-windows-x86_64.exe || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -88,3 +90,4 @@ jobs:
             artifacts/owa_calendar-macos-x86_64
             artifacts/owa_calendar-windows-x86_64.exe
           generate_release_notes: true
+          fail_on_unmatched_files: false

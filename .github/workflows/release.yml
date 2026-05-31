@@ -56,14 +56,17 @@ jobs:
       - name: Build
         run: dx build --release --platform desktop
 
-      - name: List build output
-        run: find . -maxdepth 6 \( -name "owa_calendar" -o -name "owa_calendar.exe" \) -not -path "*/deps/*" -not -path "*/.git/*" || echo "No binary found"
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p release-artifact
+          find target -maxdepth 6 -name "${{ matrix.artifact_name }}" -path "*/desktop-release/*" -not -path "*/deps/*" | head -1 | xargs -I{} cp {} release-artifact/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: target/**/desktop-release/${{ matrix.artifact_name }}
+          path: release-artifact/${{ matrix.artifact_name }}
 
   release:
     name: Publish Release
@@ -79,18 +82,20 @@ jobs:
         with:
           path: artifacts
 
-      - name: Rename artifacts
+      - name: Prepare release files
+        shell: bash
         run: |
-          [ -f artifacts/owa_calendar-linux-x86_64/owa_calendar ] && mv artifacts/owa_calendar-linux-x86_64/owa_calendar artifacts/owa_calendar-linux-x86_64 || true
-          [ -f artifacts/owa_calendar-macos-x86_64/owa_calendar ] && mv artifacts/owa_calendar-macos-x86_64/owa_calendar artifacts/owa_calendar-macos-x86_64 || true
-          [ -f "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" ] && mv "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" artifacts/owa_calendar-windows-x86_64.exe || true
+          mkdir -p release
+          [ -f artifacts/owa_calendar-linux-x86_64/owa_calendar ] && cp artifacts/owa_calendar-linux-x86_64/owa_calendar release/owa_calendar-linux-x86_64 || true
+          [ -f artifacts/owa_calendar-macos-x86_64/owa_calendar ] && cp artifacts/owa_calendar-macos-x86_64/owa_calendar release/owa_calendar-macos-x86_64 || true
+          [ -f "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" ] && cp "artifacts/owa_calendar-windows-x86_64.exe/owa_calendar.exe" release/owa_calendar-windows-x86_64.exe || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/owa_calendar-linux-x86_64
-            artifacts/owa_calendar-macos-x86_64
-            artifacts/owa_calendar-windows-x86_64.exe
+            release/owa_calendar-linux-x86_64
+            release/owa_calendar-macos-x86_64
+            release/owa_calendar-windows-x86_64.exe
           generate_release_notes: true
           fail_on_unmatched_files: false

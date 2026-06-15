@@ -66,9 +66,6 @@ fn App() -> Element {
 #[component]
 pub fn MainPage() -> Element {
     rsx! {
-        div {
-            id: "Component_Main_Page",
-            calendar_list {}
-        }
+        div { id: "Component_Main_Page", calendar_list {} }
     }
 }

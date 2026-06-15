@@ -34,7 +34,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -60,7 +59,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-artifact
-          find target -maxdepth 6 -name "${{ matrix.artifact_name }}" -path "*/desktop-release/*" -not -path "*/deps/*" | head -1 | xargs -I{} cp {} release-artifact/
+          find target/dx -name "${{ matrix.artifact_name }}" -path "*/app/*" -not -path "*/deps/*" | head -1 | xargs -I{} cp {} release-artifact/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

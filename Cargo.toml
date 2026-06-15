@@ -8,7 +8,6 @@ edition = "2021"
 
 [dependencies]
 dioxus = { version = "0.6.0", features = ["desktop"] }
-manganis = "0.2"
 image = { version = "0.24", features = ["ico"] }
 notify-rust = { version = "4.11.7", features = ["async"] }
 reqwest = { version = "0.12", features = ["cookies", "json"] }

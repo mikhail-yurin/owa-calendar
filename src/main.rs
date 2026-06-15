@@ -4,8 +4,7 @@ use dioxus::{
 };
 use owa_calendar::components::calendar::calendar_list;
 
-const FAVICON: Asset = asset!("/assets/favicon.ico");
-const MAIN_CSS: Asset = asset!("/assets/main.css");
+const MAIN_CSS: &str = include_str!("../assets/main.css");
 
 fn main() {
     // Load icon from ICO file
@@ -59,8 +58,7 @@ fn App() -> Element {
     });
 
     rsx! {
-        document::Link { rel: "icon", href: FAVICON }
-        document::Link { rel: "stylesheet", href: MAIN_CSS }
+        document::Style { {MAIN_CSS} }
         MainPage {}
     }
 }

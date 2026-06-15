@@ -14,8 +14,14 @@ pub fn calendar_list() -> Element {
     let mut unread_count: Signal<Option<u32>> = use_signal(|| None);
     let mut prev_unread: Signal<Option<u32>> = use_signal(|| None);
 
-    let mail_url = AppConfig::load().ok()
-        .map(|c| format!("{}/owa/#path=/mail/inbox", c.calendar.host.trim_end_matches('/')))
+    let mail_url = AppConfig::load()
+        .ok()
+        .map(|c| {
+            format!(
+                "{}/owa/#path=/mail/inbox",
+                c.calendar.host.trim_end_matches('/')
+            )
+        })
         .unwrap_or_default();
 
     let mail_url_for_effect = mail_url.clone();

@@ -463,6 +463,22 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
     let _ = n.show();
 }
 
+pub async fn notify_unread_emails(count: u32, mail_url: &str) {
+    let summary = format!("📬 У вас {} непрочитанных писем", count);
+    let body = format!("<a href='{}'>{}</a>", mail_url, mail_url);
+
+    let mut n = Notification::new();
+    n.appname("OWA Calendar")
+        .summary(&summary)
+        .body(&body)
+        .auto_icon()
+        .timeout(0);
+    #[cfg(target_os = "linux")]
+    let _ = n.show_async().await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = n.show();
+}
+
 pub fn extract_url(s: &str) -> &str {
     s.split_whitespace()
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))

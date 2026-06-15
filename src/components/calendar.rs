@@ -4,7 +4,7 @@ use chrono::{Datelike, Local, Weekday};
 use dioxus::prelude::*;
 use std::time::Duration;
 
-use crate::{fetch_all_data, schedule_notifications};
+use crate::{fetch_all_data, notify_unread_emails, schedule_notifications};
 
 #[component]
 pub fn calendar_list() -> Element {
@@ -12,8 +12,17 @@ pub fn calendar_list() -> Element {
     let mut is_loading = use_signal(|| false);
     let mut error_msg = use_signal(|| String::new());
     let mut unread_count: Signal<Option<u32>> = use_signal(|| None);
+    let mut prev_unread: Signal<Option<u32>> = use_signal(|| None);
+
+    let mail_url = AppConfig::load().ok()
+        .map(|c| format!("{}/owa/#path=/mail/inbox", c.calendar.host.trim_end_matches('/')))
+        .unwrap_or_default();
+
+    let mail_url_for_effect = mail_url.clone();
+    let mail_url_for_link = mail_url.clone();
 
     let fetch_data = move |_| {
+        let url = mail_url.clone();
         spawn(async move {
             is_loading.set(true);
             match fetch_all_data().await {
@@ -21,6 +30,10 @@ pub fn calendar_list() -> Element {
                     schedule_notifications(calendar_items.clone());
                     is_loading.set(false);
                     items.set(calendar_items);
+                    if Some(count) != prev_unread() && count > 0 {
+                        spawn(async move { notify_unread_emails(count, &url).await });
+                    }
+                    prev_unread.set(Some(count));
                     unread_count.set(Some(count));
                 }
                 Err(e) => {
@@ -35,6 +48,7 @@ pub fn calendar_list() -> Element {
 
     // Auto update interval
     use_effect(move || {
+        let mail_url = mail_url_for_effect.clone();
         spawn(async move {
             // Загружаем конфиг один раз при инициализации
             let config = match AppConfig::load() {
@@ -52,6 +66,11 @@ pub fn calendar_list() -> Element {
                         schedule_notifications(calendar_items.clone());
                         is_loading.set(false);
                         items.set(calendar_items);
+                        if Some(count) != prev_unread() && count > 0 {
+                            let url = mail_url.clone();
+                            spawn(async move { notify_unread_emails(count, &url).await });
+                        }
+                        prev_unread.set(Some(count));
                         unread_count.set(Some(count));
                     }
                     Err(e) => {
@@ -106,15 +125,6 @@ pub fn calendar_list() -> Element {
                     } else {
                         span { "{&today_title}" }
                         {
-                            let config = AppConfig::load().ok();
-                            let mail_url = config
-                                .map(|c| {
-                                    format!(
-                                        "{}/owa/#path=/mail/inbox",
-                                        c.calendar.host.trim_end_matches('/'),
-                                    )
-                                })
-                                .unwrap_or_default();
                             let (label, label_style) = match unread_count() {
                                 Some(n) if n > 0 => {
                                     (
@@ -133,7 +143,7 @@ pub fn calendar_list() -> Element {
                                 a {
                                     style: "font-size: 14px; cursor: pointer; text-decoration: underline; {label_style}",
                                     onclick: move |_| {
-                                        AppConfig::open_url_in_default_browser(&mail_url);
+                                        AppConfig::open_url_in_default_browser(&mail_url_for_link);
                                     },
                                     "{label}"
                                 }

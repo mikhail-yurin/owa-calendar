@@ -1,8 +1,11 @@
 use config::{Config, ConfigError, File};
+use keyring::Entry;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+
+const KEYRING_SERVICE: &str = "owa-calendar";
 
 #[derive(Deserialize, Clone)]
 pub struct AppConfig {
@@ -13,7 +16,6 @@ pub struct AppConfig {
 pub struct CalendarConfig {
     pub host: String,
     pub username: String,
-    pub password: String,
     #[serde(default = "default_fetch_interval")]
     pub fetch: u64,
     #[serde(default = "default_notify_minutes")]
@@ -97,9 +99,6 @@ host = ""
 # логин с доменом от учетной записи. Пример "DOMAIN\\username"
 username = "DOMAIN\\username"
 
-# пароль от учетной записи
-password = ""
-
 # Версия Exchange сервера (X-OWA-ClientBuildVersion)
 build_version = "15.2.1748.10"
 
@@ -121,6 +120,14 @@ action_get_folder = -57
         Self::open_file_in_default_app(path);
 
         Ok(())
+    }
+
+    pub fn get_password(username: &str) -> Result<String, keyring::Error> {
+        Entry::new(KEYRING_SERVICE, username)?.get_password()
+    }
+
+    pub fn set_credentials(username: &str, password: &str) -> Result<(), keyring::Error> {
+        Entry::new(KEYRING_SERVICE, username)?.set_password(password)
     }
 
     pub fn open_url_in_default_browser(url: &str) {

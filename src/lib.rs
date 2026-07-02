@@ -13,6 +13,17 @@ pub mod components;
 pub mod config;
 pub mod types;
 
+#[derive(Debug)]
+pub struct AuthError(pub String);
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for AuthError {}
+
 static SCHEDULED: OnceLock<Mutex<HashSet<(String, DateTime<Utc>, u8)>>> = OnceLock::new();
 
 fn url_encode(s: &str) -> String {
@@ -83,21 +94,25 @@ pub async fn authenticate_owa(
 
     // Если редирект пошёл обратно на logon.aspx — значит неверные кредо
     if final_url.path().contains("logon.aspx") {
-        return Err(format!(
-            "OWA auth failed: redirected back to login page ({}). Check username/password.",
+        return Err(Box::new(AuthError(format!(
+            "Редирект на страницу входа ({}). Проверьте логин и пароль.",
             final_url
-        )
-        .into());
+        ))));
     }
 
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(format!("OWA auth failed: HTTP {}", status).into());
+        return Err(Box::new(AuthError(format!(
+            "Ошибка авторизации: HTTP {}",
+            status
+        ))));
     }
 
     let owa_url = destination.parse::<reqwest::Url>()?;
-    let cookie_header = jar.cookies(&owa_url).ok_or(
-        "No cookies received after OWA authentication — check host/username/password in config",
-    )?;
+    let cookie_header = jar.cookies(&owa_url).ok_or_else(|| {
+        Box::new(AuthError(
+            "Нет cookies после авторизации — проверьте host, логин и пароль".to_string(),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?;
 
     let cookie_str = cookie_header
         .to_str()
@@ -321,10 +336,16 @@ pub async fn fetch_all_data(
 ) -> Result<(Vec<CalendarItem>, u32), Box<dyn std::error::Error + Send + Sync>> {
     let config = config::AppConfig::load().map_err(|e| format!("Failed to load config: {}", e))?;
 
+    let password = config::AppConfig::get_password(&config.calendar.username).map_err(|_| {
+        Box::new(AuthError(
+            "Пароль не найден в системном хранилище".to_string(),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?;
+
     let cookies = authenticate_owa(
         &config.calendar.host,
         &config.calendar.username,
-        &config.calendar.password,
+        &password,
     )
     .await?;
 

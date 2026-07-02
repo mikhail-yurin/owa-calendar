@@ -1,5 +1,6 @@
+use crate::components::credentials_dialog::credentials_dialog;
 use crate::types::CalendarItem;
-use crate::{config::AppConfig, extract_url};
+use crate::{config::AppConfig, extract_url, AuthError};
 use chrono::{Datelike, Local, Weekday};
 use dioxus::prelude::*;
 use std::time::Duration;
@@ -13,6 +14,47 @@ pub fn calendar_list() -> Element {
     let mut error_msg = use_signal(|| String::new());
     let mut unread_count: Signal<Option<u32>> = use_signal(|| None);
     let mut prev_unread: Signal<Option<u32>> = use_signal(|| None);
+    let mut show_credentials = use_signal(|| false);
+    let mut credentials_error = use_signal(|| String::new());
+    let mut pending_submit: Signal<Option<(String, String)>> = use_signal(|| None);
+
+    use_effect(move || {
+        let Some((username, password)) = pending_submit() else {
+            return;
+        };
+        spawn(async move {
+            pending_submit.set(None);
+            match AppConfig::set_credentials(&username, &password) {
+                Ok(_) => {
+                    is_loading.set(true);
+                    match fetch_all_data().await {
+                        Ok((calendar_items, count)) => {
+                            schedule_notifications(calendar_items.clone());
+                            is_loading.set(false);
+                            items.set(calendar_items);
+                            prev_unread.set(Some(count));
+                            unread_count.set(Some(count));
+                            show_credentials.set(false);
+                            credentials_error.set(String::new());
+                            error_msg.set(String::new());
+                        }
+                        Err(e) => {
+                            is_loading.set(false);
+                            if e.downcast_ref::<AuthError>().is_some() {
+                                credentials_error.set(e.to_string());
+                            } else {
+                                show_credentials.set(false);
+                                error_msg.set(e.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    credentials_error.set(format!("Ошибка сохранения пароля: {}", e));
+                }
+            }
+        });
+    });
 
     let mail_url = AppConfig::load()
         .ok()
@@ -41,12 +83,18 @@ pub fn calendar_list() -> Element {
                     }
                     prev_unread.set(Some(count));
                     unread_count.set(Some(count));
+                    show_credentials.set(false);
+                    error_msg.set(String::new());
                 }
                 Err(e) => {
                     is_loading.set(false);
-                    let msg = format!("{}", e);
-                    eprintln!("Failed to fetch data: {}", msg);
-                    error_msg.set(msg);
+                    eprintln!("Failed to fetch data: {}", e);
+                    if e.downcast_ref::<AuthError>().is_some() {
+                        credentials_error.set(e.to_string());
+                        show_credentials.set(true);
+                    } else {
+                        error_msg.set(e.to_string());
+                    }
                 }
             }
         });
@@ -56,7 +104,6 @@ pub fn calendar_list() -> Element {
     use_effect(move || {
         let mail_url = mail_url_for_effect.clone();
         spawn(async move {
-            // Загружаем конфиг один раз при инициализации
             let config = match AppConfig::load() {
                 Ok(c) => c,
                 Err(e) => {
@@ -78,10 +125,16 @@ pub fn calendar_list() -> Element {
                         }
                         prev_unread.set(Some(count));
                         unread_count.set(Some(count));
+                        show_credentials.set(false);
+                        error_msg.set(String::new());
                     }
                     Err(e) => {
                         is_loading.set(false);
                         eprintln!("Failed to fetch data: {}", e);
+                        if e.downcast_ref::<AuthError>().is_some() {
+                            credentials_error.set(e.to_string());
+                            show_credentials.set(true);
+                        }
                     }
                 }
 
@@ -172,11 +225,9 @@ pub fn calendar_list() -> Element {
             }
 
             div {
-                // onkeydown: on_keydown,
                 tabindex: 0,
                 style: "display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 8px; max-width: 100vw; outline: none; padding-top: 50px;",
-                // todo: check no connection
-                if dates.is_empty() && !is_loading() {
+                if dates.is_empty() && !is_loading() && !show_credentials() {
                     div { style: "grid-column: 1 / -1; text-align: center; padding: 40px; font-size: 24px;",
                         "No connection"
                         if !error_msg().is_empty() {
@@ -256,6 +307,13 @@ pub fn calendar_list() -> Element {
                                 }
                             }
                         })
+                }
+            }
+
+            if show_credentials() {
+                credentials_dialog {
+                    error_msg: credentials_error(),
+                    pending_submit,
                 }
             }
         }

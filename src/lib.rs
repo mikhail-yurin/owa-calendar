@@ -1,8 +1,9 @@
+use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use dioxus::prelude::spawn;
 use notify_rust::Notification;
 use reqwest::cookie::{CookieStore, Jar};
-use reqwest::header::COOKIE;
+use reqwest::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -52,17 +53,55 @@ fn scheduled_set() -> &'static Mutex<HashSet<(String, DateTime<Utc>, u8)>> {
     SCHEDULED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-pub async fn authenticate_owa(
+/// Everything needed to call OWA's service.svc after a successful login.
+/// Session cookies (incl. canary) live in the shared cookie jar and get
+/// attached to every request automatically by the client that performed
+/// the login — `basic_auth_header` is the one exception, since Basic auth
+/// isn't remembered by the server and has to be re-sent on every call.
+pub struct OwaSession {
+    pub canary: String,
+    pub basic_auth_header: Option<String>,
+}
+
+/// `DOMAIN\username` -> `("DOMAIN", "username")`. NTLM needs the domain as
+/// a separate field; other formats (UPN, bare username) are passed through
+/// with an empty domain.
+fn split_domain_username(username: &str) -> (String, String) {
+    match username.split_once('\\') {
+        Some((domain, user)) => (domain.to_string(), user.to_string()),
+        None => (String::new(), username.to_string()),
+    }
+}
+
+fn canary_from_jar(jar: &Jar, url: &reqwest::Url) -> String {
+    let Some(header) = jar.cookies(url) else {
+        return String::new();
+    };
+    let Ok(cookie_str) = header.to_str() else {
+        return String::new();
+    };
+    cookie_str
+        .split("; ")
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "X-OWA-CANARY")
+        .map(|(_, value)| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Legacy OWA "forms" login: POST credentials to auth.owa and collect the
+/// resulting session cookies. Still used by OWA deployments that show an
+/// in-page login form rather than a login popup.
+///
+/// Returns `Err((wants_challenge_auth, message))`, where the flag signals
+/// that the server answered with an HTTP auth challenge (401/403) instead
+/// of processing the form — the caller should fall back to Basic/NTLM.
+async fn authenticate_owa_forms(
+    client: &reqwest::Client,
+    jar: &Jar,
     host: &str,
     username: &str,
     password: &str,
-) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
-    let jar = Arc::new(Jar::default());
-    let client = reqwest::Client::builder()
-        .cookie_provider(jar.clone())
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0")
-        .build()?;
-
+) -> Result<OwaSession, (bool, String)> {
     let base = host.trim_end_matches('/');
     let auth_url = format!("{}/owa/auth.owa", base);
     let destination = format!("{}/owa/", base);
@@ -77,53 +116,253 @@ pub async fn authenticate_owa(
         ("isUtf8", "1"),
     ];
 
-    let response = client.post(&auth_url).form(&params).send().await?;
+    let response = client
+        .post(&auth_url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| (false, e.to_string()))?;
     let status = response.status();
     let final_url = response.url().clone();
+    // Drain the body so the connection is returned to the pool before the
+    // next request goes out — otherwise reqwest may open a second
+    // connection instead of reusing this one.
+    let _ = response.bytes().await;
 
     // Если редирект пошёл обратно на logon.aspx — значит неверные кредо
+    // (старая форма ещё жива и она их отвергла — пробовать Basic/NTLM смысла нет)
     if final_url.path().contains("logon.aspx") {
+        return Err((
+            false,
+            format!(
+                "OWA auth failed: redirected back to login page ({}). Check username/password.",
+                final_url
+            ),
+        ));
+    }
+
+    // 401/403 без редиректа на logon.aspx означает, что auth.owa либо не
+    // существует, либо блокируется гейтом перед ней — сигнализируем
+    // вызывающему коду попробовать Basic/NTLM вместо старой формы.
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err((true, format!("OWA auth failed: HTTP {}", status)));
+    }
+
+    let owa_url = destination
+        .parse::<reqwest::Url>()
+        .map_err(|e| (false, e.to_string()))?;
+    Ok(OwaSession {
+        canary: canary_from_jar(jar, &owa_url),
+        basic_auth_header: None,
+    })
+}
+
+/// OWA login via HTTP Basic auth.
+async fn authenticate_owa_basic(
+    client: &reqwest::Client,
+    jar: &Jar,
+    owa_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<OwaSession, Box<dyn std::error::Error + Send + Sync>> {
+    let auth_header = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", username, password))
+    );
+
+    let response = client
+        .get(owa_url)
+        .header(AUTHORIZATION, &auth_header)
+        .send()
+        .await?;
+    let status = response.status();
+    let _ = response.bytes().await;
+
+    if status.as_u16() == 401 || status.as_u16() == 403 {
         return Err(format!(
-            "OWA auth failed: redirected back to login page ({}). Check username/password.",
-            final_url
+            "OWA Basic auth failed: HTTP {}. Check username/password.",
+            status
         )
         .into());
     }
 
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(format!("OWA auth failed: HTTP {}", status).into());
-    }
+    let url = owa_url.parse::<reqwest::Url>()?;
+    Ok(OwaSession {
+        canary: canary_from_jar(jar, &url),
+        // Basic doesn't ride along with the session cookie, so it has to
+        // be re-attached to every subsequent request.
+        basic_auth_header: Some(auth_header),
+    })
+}
 
-    let owa_url = destination.parse::<reqwest::Url>()?;
-    let cookie_header = jar.cookies(&owa_url).ok_or(
-        "No cookies received after OWA authentication — check host/username/password in config",
-    )?;
+/// OWA login via NTLM. Unlike Forms/Basic, NTLM authenticates the
+/// underlying TCP connection rather than individual requests, so the
+/// handshake and every subsequent OWA call must share the same
+/// `reqwest::Client` (and, in practice, its pooled connection).
+async fn authenticate_owa_ntlm(
+    client: &reqwest::Client,
+    jar: &Jar,
+    owa_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<OwaSession, Box<dyn std::error::Error + Send + Sync>> {
+    let (domain, user) = split_domain_username(username);
+    let creds = ntlmclient::Credentials {
+        username: user,
+        password: password.to_string(),
+        domain,
+    };
+    const WORKSTATION: &str = "owa-calendar";
 
-    let cookie_str = cookie_header
+    let negotiate_msg = ntlmclient::Message::Negotiate(ntlmclient::NegotiateMessage {
+        flags: ntlmclient::Flags::NEGOTIATE_UNICODE
+            | ntlmclient::Flags::REQUEST_TARGET
+            | ntlmclient::Flags::NEGOTIATE_NTLM
+            | ntlmclient::Flags::NEGOTIATE_WORKSTATION_SUPPLIED,
+        supplied_domain: String::new(),
+        supplied_workstation: WORKSTATION.to_string(),
+        os_version: Default::default(),
+    });
+    let negotiate_b64 = base64::engine::general_purpose::STANDARD.encode(negotiate_msg.to_bytes()?);
+
+    let challenge_response = client
+        .get(owa_url)
+        .header(AUTHORIZATION, format!("NTLM {}", negotiate_b64))
+        .send()
+        .await?;
+
+    let challenge_header = challenge_response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .ok_or("OWA NTLM auth failed: server didn't send a Type2 challenge")?
         .to_str()
-        .map_err(|e| format!("Cookie encoding error: {}", e))?;
+        .map_err(|e| format!("OWA NTLM auth failed: unreadable challenge header: {}", e))?
+        .to_string();
+    let auth_url = challenge_response.url().clone();
+    // Drain the body before the next request, same reasoning as above.
+    let _ = challenge_response.bytes().await;
 
-    let cookies = cookie_str
-        .split("; ")
-        .filter_map(|pair: &str| {
-            let mut parts = pair.splitn(2, '=');
-            let name = parts.next()?.trim().to_string();
-            let value = parts.next().unwrap_or("").trim().to_string();
-            if name.is_empty() {
-                None
-            } else {
-                Some((name, value))
-            }
-        })
+    let challenge_b64 = challenge_header
+        .split(' ')
+        .nth(1)
+        .ok_or("OWA NTLM auth failed: malformed WWW-Authenticate header")?;
+    let challenge_bytes = base64::engine::general_purpose::STANDARD.decode(challenge_b64)?;
+    let challenge = match ntlmclient::Message::try_from(challenge_bytes.as_slice())? {
+        ntlmclient::Message::Challenge(c) => c,
+        _ => return Err("OWA NTLM auth failed: server didn't send a Type2 challenge".into()),
+    };
+    let target_info_bytes: Vec<u8> = challenge
+        .target_information
+        .iter()
+        .flat_map(|entry| entry.to_bytes())
         .collect();
 
-    Ok(cookies)
+    let response = ntlmclient::respond_challenge_ntlm_v2(
+        challenge.challenge,
+        &target_info_bytes,
+        ntlmclient::get_ntlm_time(),
+        &creds,
+    );
+    let auth_flags = ntlmclient::Flags::NEGOTIATE_UNICODE | ntlmclient::Flags::NEGOTIATE_NTLM;
+    let authenticate_msg = response.to_message(&creds, WORKSTATION, auth_flags);
+    let authenticate_b64 =
+        base64::engine::general_purpose::STANDARD.encode(authenticate_msg.to_bytes()?);
+
+    let final_response = client
+        .get(auth_url.clone())
+        .header(AUTHORIZATION, format!("NTLM {}", authenticate_b64))
+        .send()
+        .await?;
+    let status = final_response.status();
+    // Drain the body before returning — the caller immediately issues more
+    // requests on this same client and needs the connection back in the pool.
+    let _ = final_response.bytes().await;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err(format!(
+            "OWA NTLM auth failed: HTTP {}. Check username/password/domain.",
+            status
+        )
+        .into());
+    }
+
+    Ok(OwaSession {
+        canary: canary_from_jar(jar, &auth_url),
+        basic_auth_header: None,
+    })
+}
+
+/// Falls back to whichever HTTP auth scheme the server actually challenges
+/// with (found by probing `{host}/owa/` anonymously), used when the legacy
+/// forms login is no longer accepted.
+async fn authenticate_owa_challenge(
+    client: &reqwest::Client,
+    jar: &Jar,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<OwaSession, Box<dyn std::error::Error + Send + Sync>> {
+    let base = host.trim_end_matches('/');
+    let owa_url = format!("{}/owa/", base);
+
+    let probe = client.get(&owa_url).send().await?;
+    let schemes: Vec<String> = probe
+        .headers()
+        .get_all(WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.to_ascii_lowercase())
+        .collect();
+    // Drain the body before the next request, same reasoning as above.
+    let _ = probe.bytes().await;
+
+    if schemes.iter().any(|s| s.contains("ntlm")) {
+        authenticate_owa_ntlm(client, jar, &owa_url, username, password).await
+    } else if schemes.iter().any(|s| s.contains("basic")) {
+        authenticate_owa_basic(client, jar, &owa_url, username, password).await
+    } else {
+        Err(format!(
+            "OWA auth failed: server challenge at {} didn't offer a supported scheme (got: {})",
+            owa_url,
+            schemes.join(", ")
+        )
+        .into())
+    }
+}
+
+pub async fn authenticate_owa(
+    client: &reqwest::Client,
+    jar: &Jar,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<OwaSession, Box<dyn std::error::Error + Send + Sync>> {
+    match authenticate_owa_forms(client, jar, host, username, password).await {
+        Ok(session) => Ok(session),
+        Err((wants_challenge_auth, forms_err)) if wants_challenge_auth => {
+            authenticate_owa_challenge(client, jar, host, username, password)
+                .await
+                .map_err(|challenge_err| {
+                    format!(
+                        "Forms auth failed ({}); Basic/NTLM fallback also failed: {}",
+                        forms_err, challenge_err
+                    )
+                    .into()
+                })
+        }
+        Err((_, forms_err)) => Err(forms_err.into()),
+    }
+}
+
+fn apply_auth(builder: reqwest::RequestBuilder, session: &OwaSession) -> reqwest::RequestBuilder {
+    match &session.basic_auth_header {
+        Some(header) => builder.header(AUTHORIZATION, header),
+        None => builder,
+    }
 }
 
 async fn fetch_calendar_folder_id(
     client: &reqwest::Client,
-    cookie_string: &str,
-    canary: &str,
+    session: &OwaSession,
     config: &config::AppConfig,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let correlation_id = generate_correlation_id();
@@ -135,9 +374,7 @@ async fn fetch_calendar_folder_id(
         base, action_id
     );
 
-    let response = client
-        .post(&url)
-        .header(COOKIE, cookie_string)
+    let response = apply_auth(client.post(&url), session)
         .header("Accept", "*/*")
         .header("Action", "GetCalendarFolders")
         .header("Cache-Control", "no-cache")
@@ -148,7 +385,7 @@ async fn fetch_calendar_folder_id(
         .header("X-OWA-ActionId", action_id.to_string())
         .header("X-OWA-ActionName", "GetCalendarFoldersAction")
         .header("X-OWA-Attempt", "1")
-        .header("X-OWA-CANARY", canary)
+        .header("X-OWA-CANARY", &session.canary)
         .header("X-OWA-ClientBegin", client_begin)
         .header("X-OWA-ClientBuildVersion", &config.calendar.build_version)
         .header("X-OWA-CorrelationId", correlation_id.clone())
@@ -190,8 +427,7 @@ async fn fetch_calendar_folder_id(
 
 async fn fetch_calendar_inner(
     client: &reqwest::Client,
-    cookie_string: &str,
-    canary: &str,
+    session: &OwaSession,
     config: &config::AppConfig,
     folder_id: &str,
 ) -> Result<Vec<CalendarItem>, Box<dyn std::error::Error + Send + Sync>> {
@@ -220,9 +456,7 @@ async fn fetch_calendar_inner(
         base, action_id
     );
 
-    let response = client
-        .post(calendar_url)
-        .header(COOKIE, cookie_string)
+    let response = apply_auth(client.post(calendar_url), session)
         .header("Accept", "*/*")
         .header("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
         .header("Action", "GetCalendarView")
@@ -238,7 +472,7 @@ async fn fetch_calendar_inner(
         .header("X-OWA-ActionId", action_id.to_string())
         .header("X-OWA-ActionName", "GetCalendarViewAction_PrefetchMonth")
         .header("X-OWA-Attempt", "1")
-        .header("X-OWA-CANARY", canary)
+        .header("X-OWA-CANARY", &session.canary)
         .header("X-OWA-ClientBegin", client_begin)
         .header("X-OWA-ClientBuildVersion", &config.calendar.build_version)
         .header("X-OWA-CorrelationId", correlation_id.clone())
@@ -269,8 +503,7 @@ async fn fetch_calendar_inner(
 
 async fn fetch_unread_count_inner(
     client: &reqwest::Client,
-    cookie_string: &str,
-    canary: &str,
+    session: &OwaSession,
     config: &config::AppConfig,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let url_post_data = "%7B%22__type%22%3A%22GetFolderJsonRequest%3A%23Exchange%22%2C%22Header%22%3A%7B%22__type%22%3A%22JsonRequestHeaders%3A%23Exchange%22%2C%22RequestServerVersion%22%3A%22V2017_08_18%22%2C%22TimeZoneContext%22%3A%7B%22__type%22%3A%22TimeZoneContext%3A%23Exchange%22%2C%22TimeZoneDefinition%22%3A%7B%22__type%22%3A%22TimeZoneDefinitionType%3A%23Exchange%22%2C%22Id%22%3A%22Russian%20Standard%20Time%22%7D%7D%7D%2C%22Body%22%3A%7B%22__type%22%3A%22GetFolderRequest%3A%23Exchange%22%2C%22FolderShape%22%3A%7B%22__type%22%3A%22FolderResponseShape%3A%23Exchange%22%2C%22BaseShape%22%3A%22IdOnly%22%2C%22AdditionalProperties%22%3A%5B%7B%22__type%22%3A%22PropertyUri%3A%23Exchange%22%2C%22FieldURI%22%3A%22folder%3AUnreadCount%22%7D%5D%7D%2C%22FolderIds%22%3A%5B%7B%22__type%22%3A%22DistinguishedFolderId%3A%23Exchange%22%2C%22Id%22%3A%22inbox%22%7D%5D%7D%7D";
@@ -285,9 +518,7 @@ async fn fetch_unread_count_inner(
     let correlation_id = generate_correlation_id();
     let client_begin = Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
 
-    let response = client
-        .post(&service_url)
-        .header(COOKIE, cookie_string)
+    let response = apply_auth(client.post(&service_url), session)
         .header("Accept", "*/*")
         .header("Action", "GetFolder")
         .header("Cache-Control", "no-cache")
@@ -297,7 +528,7 @@ async fn fetch_unread_count_inner(
         .header("X-OWA-ActionId", action_id.to_string())
         .header("X-OWA-ActionName", "GetFolderAction")
         .header("X-OWA-Attempt", "1")
-        .header("X-OWA-CANARY", canary)
+        .header("X-OWA-CANARY", &session.canary)
         .header("X-OWA-ClientBegin", client_begin)
         .header("X-OWA-ClientBuildVersion", &config.calendar.build_version)
         .header("X-OWA-CorrelationId", correlation_id.clone())
@@ -321,35 +552,29 @@ pub async fn fetch_all_data(
 ) -> Result<(Vec<CalendarItem>, u32), Box<dyn std::error::Error + Send + Sync>> {
     let config = config::AppConfig::load().map_err(|e| format!("Failed to load config: {}", e))?;
 
-    let cookies = authenticate_owa(
+    // Cookies (incl. canary) and, for NTLM, the authenticated TCP connection
+    // itself must be shared between the login and every subsequent OWA
+    // call, so both use this one client/jar for the whole session.
+    let jar = Arc::new(Jar::default());
+    let client = reqwest::Client::builder()
+        .cookie_provider(jar.clone())
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0")
+        .build()?;
+
+    let session = authenticate_owa(
+        &client,
+        &jar,
         &config.calendar.host,
         &config.calendar.username,
         &config.calendar.password,
     )
     .await?;
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0")
-        .build()?;
-
-    let cookie_string = cookies
-        .iter()
-        .map(|(name, value)| format!("{}={}", name, value))
-        .collect::<Vec<_>>()
-        .join("; ");
-
-    let canary = cookies
-        .iter()
-        .find(|(name, _)| name == "X-OWA-CANARY")
-        .map(|(_, value)| value.clone())
-        .unwrap_or_default();
-
-    let folder_id = fetch_calendar_folder_id(&client, &cookie_string, &canary, &config)
+    let folder_id = fetch_calendar_folder_id(&client, &session, &config)
         .await
         .map_err(|e| format!("Failed to discover calendar folder: {}", e))?;
-    let calendar_items =
-        fetch_calendar_inner(&client, &cookie_string, &canary, &config, &folder_id).await?;
-    let unread_count = fetch_unread_count_inner(&client, &cookie_string, &canary, &config).await?;
+    let calendar_items = fetch_calendar_inner(&client, &session, &config, &folder_id).await?;
+    let unread_count = fetch_unread_count_inner(&client, &session, &config).await?;
 
     Ok((calendar_items, unread_count))
 }

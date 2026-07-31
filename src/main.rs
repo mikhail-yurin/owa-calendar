@@ -33,7 +33,7 @@ fn main() {
                         )
                         .expect("Failed to create icon"),
                     ))
-                    .with_title("OWA Calendar"),
+                    .with_title("OWA Календарь"),
             ),
         )
         .launch(App);

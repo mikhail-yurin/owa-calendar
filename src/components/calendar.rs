@@ -127,7 +127,7 @@ pub fn calendar_list() -> Element {
                 }
                 div { style: "font-size: 22px; font-weight: 700; flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px;",
                     if is_loading() {
-                        span { "Calendar is loading..." }
+                        span { "Загрузка..." }
                     } else {
                         span { "{&today_title}" }
                         {

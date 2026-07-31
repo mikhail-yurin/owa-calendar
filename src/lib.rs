@@ -16,6 +16,13 @@ pub mod types;
 
 static SCHEDULED: OnceLock<Mutex<HashSet<(String, DateTime<Utc>, u8)>>> = OnceLock::new();
 
+const RUSSIAN_TRUSTED_ROOT_CA_PEM: &[u8] = include_bytes!("../assets/russian_trusted_root_ca.pem");
+
+fn russian_trusted_root_ca() -> reqwest::Certificate {
+    reqwest::Certificate::from_pem(RUSSIAN_TRUSTED_ROOT_CA_PEM)
+        .expect("встроенный сертификат Russian Trusted Root CA повреждён")
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
@@ -559,6 +566,7 @@ pub async fn fetch_all_data(
     let client = reqwest::Client::builder()
         .cookie_provider(jar.clone())
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0")
+        .add_root_certificate(russian_trusted_root_ca())
         .build()?;
 
     let session = authenticate_owa(

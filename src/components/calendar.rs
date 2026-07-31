@@ -56,7 +56,7 @@ pub fn calendar_list() -> Element {
     use_effect(move || {
         let mail_url = mail_url_for_effect.clone();
         spawn(async move {
-            // Загружаем конфиг один раз при инициализации
+            // Load the config once on init
             let config = match AppConfig::load() {
                 Ok(c) => c,
                 Err(e) => {

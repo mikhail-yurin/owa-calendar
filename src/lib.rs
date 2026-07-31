@@ -580,10 +580,10 @@ pub async fn fetch_all_data(
 }
 
 pub fn schedule_notifications(events: Vec<CalendarItem>) {
-    // Загружаем конфиг для получения времени уведомления
+    // Load the config to get a notification timeout
     let notify_minutes = match config::AppConfig::load() {
         Ok(cfg) => cfg.calendar.notify,
-        Err(_) => 15, // fallback на 15 минут
+        Err(_) => 15, // fallback - 15 min
     };
 
     let now = Local::now();
@@ -595,7 +595,7 @@ pub fn schedule_notifications(events: Vec<CalendarItem>) {
 
         let local_start = event.start.with_timezone(&Local);
 
-        // Уведомление за N минут до события
+        // Notification before N min until the event
         let notify_min_timeout = local_start - ChronoDuration::minutes(notify_minutes);
         if notify_min_timeout > now {
             let key = (event.subject.clone(), event.start, 0u8);
@@ -615,7 +615,7 @@ pub fn schedule_notifications(events: Vec<CalendarItem>) {
             }
         }
 
-        // Уведомление в момент начала события
+        // Notification at the start of the event
         if local_start > now {
             let key = (event.subject.clone(), event.start, 1u8);
             let mut set = scheduled_set().lock().unwrap();
@@ -647,7 +647,7 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
 
     let (summary, body) = match notification_type {
         NotificationType::FifteenMinutes => {
-            let summary = format!("⏰ Через 15 минут: {}", event.subject);
+            let summary = format!("⏰ 15 min untill: {}", event.subject);
             let body = format!(
                 "<b>Начало:</b> {}\n<a href='{}'>{}</a>",
                 local_start.format("%H:%M"),
@@ -657,7 +657,7 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
             (summary, body)
         }
         NotificationType::EventStart => {
-            let summary = format!("🔔 Началось: {}", event.subject);
+            let summary = format!("🔔 Started: {}", event.subject);
             let body = format!(
                 "<b>Время:</b> {}\n<a href='{}'>{}</a>",
                 local_start.format("%H:%M"),
@@ -689,7 +689,7 @@ pub async fn send_notification(event: CalendarItem, notification_type: Notificat
 }
 
 pub async fn notify_unread_emails(count: u32, mail_url: &str) {
-    let summary = format!("📬 У вас {} непрочитанных писем", count);
+    let summary = format!("📬 You have {} unread emails", count);
     let body = format!("<a href='{}'>{}</a>", mail_url, mail_url);
 
     let mut n = Notification::new();

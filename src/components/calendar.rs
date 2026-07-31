@@ -56,7 +56,7 @@ pub fn calendar_list() -> Element {
     use_effect(move || {
         let mail_url = mail_url_for_effect.clone();
         spawn(async move {
-            // Загружаем конфиг один раз при инициализации
+            // Load the config once on init
             let config = match AppConfig::load() {
                 Ok(c) => c,
                 Err(e) => {
@@ -134,13 +134,13 @@ pub fn calendar_list() -> Element {
                             let (label, label_style) = match unread_count() {
                                 Some(n) if n > 0 => {
                                     (
-                                        format!("непрочитанных писем: {}", n),
+                                        format!("unread emails: {}", n),
                                         "font-weight: 700; color: #cc2200;",
                                     )
                                 }
                                 _ => {
                                     (
-                                        "Открыть почту в браузере".to_string(),
+                                        "Open email in a browser".to_string(),
                                         "font-weight: 400; color: #555;",
                                     )
                                 }

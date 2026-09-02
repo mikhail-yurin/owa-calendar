@@ -1,6 +1,6 @@
 use crate::types::CalendarItem;
 use crate::{config::AppConfig, extract_url};
-use chrono::{Datelike, Local, Weekday};
+use chrono::{Datelike, Duration as ChronoDuration, Local};
 use dioxus::prelude::*;
 use std::time::Duration;
 
@@ -111,13 +111,67 @@ pub fn calendar_list() -> Element {
             .push(event);
     }
 
-    // Sort dates
-    let mut dates: Vec<String> = events_by_date.keys().cloned().collect();
-    dates.sort();
-
     let today = Local::now();
     let today_string = today.format("%Y-%m-%d").to_string();
     let today_title = today.format("%d.%m.%Y").to_string();
+
+    // Show a continuous range of days starting from Monday of the current
+    // week. Days without events keep their cell; only Sat/Sun are dropped
+    // when empty (handled via `day_offsets`).
+    let today_date = today.date_naive();
+    let start_monday =
+        today_date - ChronoDuration::days(today_date.weekday().num_days_from_monday() as i64);
+
+    // Extend up to the latest day that has an event (never earlier than the
+    // current week). With no events we still render the current week.
+    let last_event_date = events_by_date
+        .keys()
+        .filter_map(|key| chrono::NaiveDate::parse_from_str(key, "%Y-%m-%d").ok())
+        .filter(|date| *date >= start_monday)
+        .max()
+        .unwrap_or(start_monday);
+
+    // Nothing to show until the first fetch lands; the "No connection" block
+    // below covers the empty state on its own.
+    let mut weeks: Vec<chrono::NaiveDate> = Vec::new();
+    if !events_by_date.is_empty() {
+        let mut week_cursor = start_monday;
+        while week_cursor <= last_event_date {
+            weeks.push(week_cursor);
+            week_cursor += ChronoDuration::days(7);
+        }
+    }
+
+    // A weekend column is shown for every week (so column widths stay
+    // consistent across rows) as soon as any displayed week has an event on
+    // that weekday. Offsets are days from Monday: 5 = Sat, 6 = Sun.
+    let weekday_has_events = |offset: i64| {
+        weeks.iter().any(|week_start| {
+            let day = *week_start + ChronoDuration::days(offset);
+            events_by_date.contains_key(&day.format("%Y-%m-%d").to_string())
+        })
+    };
+    let mut day_offsets: Vec<i64> = vec![0, 1, 2, 3, 4];
+    if weekday_has_events(5) {
+        day_offsets.push(5);
+    }
+    if weekday_has_events(6) {
+        day_offsets.push(6);
+    }
+    let day_count = day_offsets.len();
+
+    // Flatten weeks into a single stream of days. Every week contributes
+    // exactly `day_count` cells, so a `repeat(day_count, 1fr)` grid wraps to a
+    // new row precisely on each week boundary.
+    let day_cells: Vec<chrono::NaiveDate> = weeks
+        .iter()
+        .flat_map(|week_start| {
+            let week_start = *week_start;
+            day_offsets
+                .iter()
+                .map(move |offset| week_start + ChronoDuration::days(*offset))
+        })
+        .collect();
 
     rsx! {
         div {
@@ -174,9 +228,9 @@ pub fn calendar_list() -> Element {
             div {
                 // onkeydown: on_keydown,
                 tabindex: 0,
-                style: "display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 8px; max-width: 100vw; outline: none; padding-top: 50px;",
+                style: "display: grid; grid-template-columns: repeat({day_count}, 1fr); gap: 8px; padding: 8px; max-width: 100vw; outline: none; padding-top: 50px;",
                 // todo: check no connection
-                if dates.is_empty() && !is_loading() {
+                if events_by_date.is_empty() && !is_loading() {
                     div { style: "grid-column: 1 / -1; text-align: center; padding: 40px; font-size: 24px;",
                         "No connection"
                         if !error_msg().is_empty() {
@@ -187,71 +241,61 @@ pub fn calendar_list() -> Element {
                     }
                 }
                 {
-                    dates
+                    day_cells
                         .iter()
-                        .skip_while(|date| {
-                            let events = &events_by_date[*date];
-                            let local_start = events[0].start.with_timezone(&Local);
-                            local_start.weekday() != Weekday::Mon
-                        })
-                        .map(|date| {
-                            let events = &events_by_date[date];
-                            let local_start = events[0].start.with_timezone(&Local);
-                            let weekday = local_start.weekday();
+                        .map(|day| {
+                            let date_key = day.format("%Y-%m-%d").to_string();
+                            let weekday = day.weekday();
+                            let display_date = day.format("%d.%m.%Y").to_string();
+                            let is_today = date_key == today_string;
                             let today_color = "#f1e8ddff";
-                            let display_date = local_start.format("%d.%m.%Y").to_string();
-                            let border_color = if date == &today_string {
-                                today_color
-                            } else {
-                                "#f2ded7"
-                            };
-                            let border_width = if date == &today_string { "2px" } else { "1px" };
-                            let background = if date == &today_string {
-                                today_color
-                            } else {
-                                "unset"
-                            };
+                            let border_color = if is_today { today_color } else { "#f2ded7" };
+                            let border_width = if is_today { "2px" } else { "1px" };
+                            let background = if is_today { today_color } else { "unset" };
+                            let day_events = events_by_date.get(&date_key);
                             rsx! {
                                 div { style: "border: {border_width} solid {border_color}; padding: 8px; display: flex; flex-direction: column; background-color: {background};",
                                     div { style: "font-weight: bold; margin-bottom: 8px;", "{weekday}, {display_date}" }
-                                    {
-                                        events
-                                            .iter()
-                                            .map(|event| {
-                                                let location = event
-                                                    .location
-                                                    .as_ref()
-                                                    .map_or(String::new(), |loc| loc.display_name.clone());
-                                                let location_url = extract_url(location.as_str());
-                                                let local_start = event.start.with_timezone(&Local);
-                                                let local_end = event.end.with_timezone(&Local);
-                                                let start_time = local_start.format("%H:%M").to_string();
-                                                let end_time = local_end.format("%H:%M").to_string();
-                                                let now = Local::now();
-                                                let is_current_event = now >= local_start && now <= local_end;
-                                                let past_event_color = "#aaaaaaff";
-                                                let subject_style = if is_current_event {
-                                                    "font-weight: bold;".to_string()
-                                                } else if now > local_end {
-                                                    format!("text-decoration: line-through; color: {}", past_event_color)
-                                                } else {
-                                                    String::new()
-                                                };
+                                    if let Some(events) = day_events {
+                                        {
+                                            events
+                                                .iter()
+                                                .map(|event| {
+                                                    let location = event
+                                                        .location
+                                                        .as_ref()
+                                                        .map_or(String::new(), |loc| loc.display_name.clone());
+                                                    let location_url = extract_url(location.as_str());
+                                                    let local_start = event.start.with_timezone(&Local);
+                                                    let local_end = event.end.with_timezone(&Local);
+                                                    let start_time = local_start.format("%H:%M").to_string();
+                                                    let end_time = local_end.format("%H:%M").to_string();
+                                                    let now = Local::now();
+                                                    let is_current_event = now >= local_start && now <= local_end;
+                                                    let past_event_color = "#aaaaaaff";
+                                                    let subject_style = if is_current_event {
+                                                        "font-weight: bold;".to_string()
+                                                    } else if now > local_end {
+                                                        format!("text-decoration: line-through; color: {}", past_event_color)
+                                                    } else {
+                                                        String::new()
+                                                    };
 
-                                                rsx! {
-                                                    div { style: "margin-top: 12px; font-size: 0.9em;",
-                                                        div { style: "display: flex; justify-content: space-between;",
-                                                            div { style: "{subject_style}", "{event.subject}" }
-                                                            div { style: "white-space: nowrap;", "{start_time} - {end_time}" }
-                                                        }
-                                                        if now <= local_end {
-                                                            if !location_url.is_empty() {
-                                                                a { href: "{location_url}", style: "font-size: 0.8em;", "{location_url}" }
+                                                    rsx! {
+                                                        div { style: "margin-top: 12px; font-size: 0.9em;",
+                                                            div { style: "display: flex; justify-content: space-between;",
+                                                                div { style: "{subject_style}", "{event.subject}" }
+                                                                div { style: "white-space: nowrap;", "{start_time} - {end_time}" }
+                                                            }
+                                                            if now <= local_end {
+                                                                if !location_url.is_empty() {
+                                                                    a { href: "{location_url}", style: "font-size: 0.8em;", "{location_url}" }
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
-                                            })
+                                                })
+                                        }
                                     }
                                 }
                             }

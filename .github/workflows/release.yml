@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-artifact
-          find target/dx -name "${{ matrix.artifact_name }}" -path "*/app/*" -not -path "*/deps/*" | head -1 | xargs -I{} cp {} release-artifact/
+          find target/dx -type f -name "${{ matrix.artifact_name }}" -not -path "*/deps/*" | head -1 | xargs -I{} cp {} release-artifact/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

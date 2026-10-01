@@ -14,6 +14,17 @@ pub mod components;
 pub mod config;
 pub mod types;
 
+#[derive(Debug)]
+pub struct AuthError(pub String);
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for AuthError {}
+
 static SCHEDULED: OnceLock<Mutex<HashSet<(String, DateTime<Utc>, u8)>>> = OnceLock::new();
 
 fn url_encode(s: &str) -> String {
@@ -88,20 +99,35 @@ fn canary_from_jar(jar: &Jar, url: &reqwest::Url) -> String {
         .unwrap_or_default()
 }
 
+/// Why the forms login gave up, so `authenticate_owa` knows what to try next.
+enum FormsAuthError {
+    /// The form itself rejected the credentials (redirect back to the login
+    /// page). Basic/NTLM won't do any better — surface it to the user.
+    BadCredentials(String),
+    /// The server answered the form POST with an HTTP auth challenge
+    /// (401/403) instead of processing it — fall back to Basic/NTLM.
+    WantsChallenge(String),
+    /// Something unrelated to credentials went wrong (network, bad URL).
+    Other(String),
+}
+
+/// A 401/403 that comes back *after* we've supplied credentials means they
+/// were rejected. Wrapping it in `AuthError` lets the UI tell it apart from
+/// transport failures and re-prompt for a password.
+fn rejected_credentials(msg: String) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(AuthError(msg))
+}
+
 /// Legacy OWA "forms" login: POST credentials to auth.owa and collect the
 /// resulting session cookies. Still used by OWA deployments that show an
 /// in-page login form rather than a login popup.
-///
-/// Returns `Err((wants_challenge_auth, message))`, where the flag signals
-/// that the server answered with an HTTP auth challenge (401/403) instead
-/// of processing the form — the caller should fall back to Basic/NTLM.
 async fn authenticate_owa_forms(
     client: &reqwest::Client,
     jar: &Jar,
     host: &str,
     username: &str,
     password: &str,
-) -> Result<OwaSession, (bool, String)> {
+) -> Result<OwaSession, FormsAuthError> {
     let base = host.trim_end_matches('/');
     let auth_url = format!("{}/owa/auth.owa", base);
     let destination = format!("{}/owa/", base);
@@ -121,7 +147,7 @@ async fn authenticate_owa_forms(
         .form(&params)
         .send()
         .await
-        .map_err(|e| (false, e.to_string()))?;
+        .map_err(|e| FormsAuthError::Other(e.to_string()))?;
     let status = response.status();
     let final_url = response.url().clone();
     // Drain the body so the connection is returned to the pool before the
@@ -132,25 +158,25 @@ async fn authenticate_owa_forms(
     // Если редирект пошёл обратно на logon.aspx — значит неверные кредо
     // (старая форма ещё жива и она их отвергла — пробовать Basic/NTLM смысла нет)
     if final_url.path().contains("logon.aspx") {
-        return Err((
-            false,
-            format!(
-                "OWA auth failed: redirected back to login page ({}). Check username/password.",
-                final_url
-            ),
-        ));
+        return Err(FormsAuthError::BadCredentials(format!(
+            "OWA auth failed: redirected back to login page ({}). Check username/password.",
+            final_url
+        )));
     }
 
     // 401/403 без редиректа на logon.aspx означает, что auth.owa либо не
     // существует, либо блокируется гейтом перед ней — сигнализируем
     // вызывающему коду попробовать Basic/NTLM вместо старой формы.
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err((true, format!("OWA auth failed: HTTP {}", status)));
+        return Err(FormsAuthError::WantsChallenge(format!(
+            "OWA auth failed: HTTP {}",
+            status
+        )));
     }
 
     let owa_url = destination
         .parse::<reqwest::Url>()
-        .map_err(|e| (false, e.to_string()))?;
+        .map_err(|e| FormsAuthError::Other(e.to_string()))?;
     Ok(OwaSession {
         canary: canary_from_jar(jar, &owa_url),
         basic_auth_header: None,
@@ -179,11 +205,10 @@ async fn authenticate_owa_basic(
     let _ = response.bytes().await;
 
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(format!(
+        return Err(rejected_credentials(format!(
             "OWA Basic auth failed: HTTP {}. Check username/password.",
             status
-        )
-        .into());
+        )));
     }
 
     let url = owa_url.parse::<reqwest::Url>()?;
@@ -278,11 +303,10 @@ async fn authenticate_owa_ntlm(
     // requests on this same client and needs the connection back in the pool.
     let _ = final_response.bytes().await;
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(format!(
+        return Err(rejected_credentials(format!(
             "OWA NTLM auth failed: HTTP {}. Check username/password/domain.",
             status
-        )
-        .into());
+        )));
     }
 
     Ok(OwaSession {
@@ -338,18 +362,27 @@ pub async fn authenticate_owa(
 ) -> Result<OwaSession, Box<dyn std::error::Error + Send + Sync>> {
     match authenticate_owa_forms(client, jar, host, username, password).await {
         Ok(session) => Ok(session),
-        Err((wants_challenge_auth, forms_err)) if wants_challenge_auth => {
+        Err(FormsAuthError::WantsChallenge(forms_err)) => {
             authenticate_owa_challenge(client, jar, host, username, password)
                 .await
                 .map_err(|challenge_err| {
-                    format!(
+                    let combined = format!(
                         "Forms auth failed ({}); Basic/NTLM fallback also failed: {}",
                         forms_err, challenge_err
-                    )
-                    .into()
+                    );
+                    // Preserve the "credentials rejected" signal so the UI
+                    // re-prompts instead of showing a generic error.
+                    if challenge_err.downcast_ref::<AuthError>().is_some() {
+                        Box::new(AuthError(combined)) as Box<dyn std::error::Error + Send + Sync>
+                    } else {
+                        combined.into()
+                    }
                 })
         }
-        Err((_, forms_err)) => Err(forms_err.into()),
+        Err(FormsAuthError::BadCredentials(msg)) => {
+            Err(Box::new(AuthError(msg)) as Box<dyn std::error::Error + Send + Sync>)
+        }
+        Err(FormsAuthError::Other(msg)) => Err(msg.into()),
     }
 }
 
@@ -552,6 +585,12 @@ pub async fn fetch_all_data(
 ) -> Result<(Vec<CalendarItem>, u32), Box<dyn std::error::Error + Send + Sync>> {
     let config = config::AppConfig::load().map_err(|e| format!("Failed to load config: {}", e))?;
 
+    let password = config::AppConfig::get_password(&config.calendar.username).map_err(|_| {
+        Box::new(AuthError(
+            "Пароль не найден в системном хранилище".to_string(),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?;
+
     // Cookies (incl. canary) and, for NTLM, the authenticated TCP connection
     // itself must be shared between the login and every subsequent OWA
     // call, so both use this one client/jar for the whole session.
@@ -566,7 +605,7 @@ pub async fn fetch_all_data(
         &jar,
         &config.calendar.host,
         &config.calendar.username,
-        &config.calendar.password,
+        &password,
     )
     .await?;
 
@@ -708,4 +747,39 @@ pub fn extract_url(s: &str) -> &str {
     s.split_whitespace()
         .find(|word| word.starts_with("http://") || word.starts_with("https://"))
         .unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_url, split_domain_username};
+
+    #[test]
+    fn splits_domain_qualified_username() {
+        assert_eq!(
+            split_domain_username("ACME\\jdoe"),
+            ("ACME".to_string(), "jdoe".to_string())
+        );
+    }
+
+    #[test]
+    fn passes_through_bare_and_upn_usernames() {
+        assert_eq!(
+            split_domain_username("jdoe"),
+            (String::new(), "jdoe".to_string())
+        );
+        assert_eq!(
+            split_domain_username("jdoe@acme.com"),
+            (String::new(), "jdoe@acme.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_url_finds_first_http_token() {
+        assert_eq!(
+            extract_url("Room 1 https://meet.example.com/x join"),
+            "https://meet.example.com/x"
+        );
+        assert_eq!(extract_url("no link here"), "");
+        assert_eq!(extract_url(""), "");
+    }
 }

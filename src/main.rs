@@ -24,7 +24,7 @@ fn main() {
                 WindowBuilder::new()
                     .with_maximized(true)
                     .with_decorations(true)
-                    .with_resizable(false)
+                    .with_resizable(true)
                     .with_window_icon(Some(
                         dioxus::desktop::tao::window::Icon::from_rgba(
                             icon_rgba,

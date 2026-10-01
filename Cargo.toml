@@ -19,7 +19,12 @@ config = "0.14"
 dirs = "5.0"
 base64 = "0.22"
 ntlmclient = "0.2"
-keyring = "3"
+keyring = { version = "3", features = [
+    "sync-secret-service",
+    "crypto-rust",
+    "apple-native",
+    "windows-native",
+] }
 
 [profile]
 

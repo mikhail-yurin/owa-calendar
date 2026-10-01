@@ -54,6 +54,41 @@ fn default_action_get_folder() -> i32 {
     -57
 }
 
+/// Rewrites the `username = "..."` assignment in a TOML config string,
+/// preserving every other line. Returns `None` when there is no such line.
+fn replace_username_line(content: &str, username: &str) -> Option<String> {
+    let escaped = username.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut replaced = false;
+    let mut out: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let is_username_assignment = !replaced
+            && trimmed
+                .strip_prefix("username")
+                .map(|rest| rest.trim_start().starts_with('='))
+                .unwrap_or(false);
+
+        if is_username_assignment {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push(format!("{}username = \"{}\"", indent, escaped));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        return None;
+    }
+
+    let mut result = out.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
 impl AppConfig {
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::get_config_path();
@@ -127,7 +162,23 @@ action_get_folder = -57
     }
 
     pub fn set_credentials(username: &str, password: &str) -> Result<(), keyring::Error> {
-        Entry::new(KEYRING_SERVICE, username)?.set_password(password)
+        Entry::new(KEYRING_SERVICE, username)?.set_password(password)?;
+        // Keep config.toml's `username` in sync so the next launch looks the
+        // password up under the same keyring key. Best-effort: a failed
+        // config write shouldn't fail an otherwise-successful login.
+        if let Err(e) = Self::write_username_to_config(username) {
+            eprintln!("Failed to persist username to config: {}", e);
+        }
+        Ok(())
+    }
+
+    fn write_username_to_config(username: &str) -> std::io::Result<()> {
+        let path = Self::get_config_path();
+        let content = fs::read_to_string(&path)?;
+        match replace_username_line(&content, username) {
+            Some(updated) if updated != content => fs::write(&path, updated),
+            _ => Ok(()),
+        }
     }
 
     pub fn open_url_in_default_browser(url: &str) {
@@ -164,5 +215,53 @@ action_get_folder = -57
                 .args(&["/C", "start", "", path.to_str().unwrap_or("")])
                 .spawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_username_line;
+
+    #[test]
+    fn replaces_the_username_line_and_keeps_the_rest() {
+        let src = "[calendar]\n# comment\nhost = \"h\"\nusername = \"DOMAIN\\\\old\"\nfetch = 10\n";
+        let out = replace_username_line(src, "ACME\\new").unwrap();
+        assert_eq!(
+            out,
+            "[calendar]\n# comment\nhost = \"h\"\nusername = \"ACME\\\\new\"\nfetch = 10\n"
+        );
+    }
+
+    #[test]
+    fn escapes_backslashes_and_quotes() {
+        let out = replace_username_line("username = \"\"\n", "d\\u\"x").unwrap();
+        assert_eq!(out, "username = \"d\\\\u\\\"x\"\n");
+    }
+
+    #[test]
+    fn preserves_trailing_newline_state() {
+        assert!(replace_username_line("username = \"a\"", "b")
+            .unwrap()
+            .ends_with("\"b\""));
+        assert!(replace_username_line("username = \"a\"\n", "b")
+            .unwrap()
+            .ends_with("\"b\"\n"));
+    }
+
+    #[test]
+    fn returns_none_when_no_username_line() {
+        assert!(replace_username_line("[calendar]\nhost = \"h\"\n", "b").is_none());
+    }
+
+    #[test]
+    fn ignores_commented_and_lookalike_keys() {
+        let src = "# username = \"x\"\nusername_extra = \"y\"\n";
+        assert!(replace_username_line(src, "b").is_none());
+    }
+
+    #[test]
+    fn matches_without_spaces_around_equals() {
+        let out = replace_username_line("username=\"a\"\n", "b").unwrap();
+        assert_eq!(out, "username = \"b\"\n");
     }
 }

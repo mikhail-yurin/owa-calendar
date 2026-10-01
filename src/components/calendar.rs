@@ -270,6 +270,13 @@ pub fn calendar_list() -> Element {
                         "v{env!(\"CARGO_PKG_VERSION\")}"
                     }
                     button {
+                        onclick: move |_| {
+                            credentials_error.set(String::new());
+                            show_credentials.set(true);
+                        },
+                        "Credentials"
+                    }
+                    button {
                         onclick: |_| {
                             let path = AppConfig::get_config_path();
                             AppConfig::open_file_in_default_app(&path);
@@ -360,6 +367,7 @@ pub fn calendar_list() -> Element {
                 credentials_dialog {
                     error_msg: credentials_error(),
                     pending_submit,
+                    on_close: move |_| show_credentials.set(false),
                 }
             }
         }

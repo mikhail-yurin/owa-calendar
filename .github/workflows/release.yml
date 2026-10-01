@@ -47,7 +47,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libxdo-dev
+            libxdo-dev \
+            libdbus-1-dev
 
       - name: Install Dioxus CLI
         run: cargo install dioxus-cli --locked
